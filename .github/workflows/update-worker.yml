@@ -10,44 +10,48 @@ jobs:
   update:
     runs-on: ubuntu-latest
 
+    # 解決 Node.js 20 棄用警告的核心設定
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     permissions:
       contents: write
 
     steps:
       - name: Checkout 仓库
         uses: actions/checkout@v4
+        with:
+          # 確保獲取最新代碼以避免提交衝突
+          fetch-depth: 1
 
       # 步骤 1: 获取版本信息并判断是否需要更新
       - name: 检查版本并获取最新版本
         id: check_versions
         run: |
-          # 1. 获取最新正式版标签
-          LATEST_TAG=$(curl -s https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases/latest | jq -r '.tag_name')
+          echo "正在檢查上游版本..."
+          # 获取最新正式版标签
+          LATEST_TAG=$(curl -s https://github.com | jq -r '.tag_name')
           
           if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-            echo "::error::未找到最新正式发布版本，退出。"
+            echo "::error::無法獲取最新版本號，請檢查網路或 API 限制。"
             exit 1
           fi
 
-          # 2. 获取本地版本
-          if [ -f "version.txt" ]; then
-            CURRENT_VERSION=$(cat version.txt | tr -d '\n' | tr -d '\r')
-          else
-            CURRENT_VERSION=""
-          fi
+          # 获取本地版本 (若檔案不存在則為空)
+          CURRENT_VERSION=$(cat version.txt 2>/dev/null || echo "")
 
-          echo "最新版本: $LATEST_TAG"
-          echo "当前本地版本: ${CURRENT_VERSION:-未找到}"
+          echo "最新上游版本: $LATEST_TAG"
+          echo "當前本地版本: ${CURRENT_VERSION:-尚未安裝}"
 
-          # 3. 比较版本，设置环境变量
+          # 比较版本
           if [ "$CURRENT_VERSION" = "$LATEST_TAG" ]; then
-            echo "No update needed."
+            echo "版本一致，無需更新。"
             echo "need_update=false" >> $GITHUB_ENV
           else
-            echo "Update needed. New tag: $LATEST_TAG"
+            echo "偵測到新版本！準備更新..."
             echo "latest_tag=$LATEST_TAG" >> $GITHUB_ENV
             echo "need_update=true" >> $GITHUB_ENV
-            echo "download_url=https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/download/$LATEST_TAG/worker.zip" >> $GITHUB_ENV
+            echo "download_url=https://github.com" >> $GITHUB_ENV
           fi
 
       # 步骤 2: 下载并解压 (仅在需要更新时执行)
@@ -55,20 +59,28 @@ jobs:
         if: env.need_update == 'true'
         run: |
           TEMP_ZIP="worker_temp.zip"
-          echo "正在下载文件: ${{ env.download_url }}"
+          echo "正在從 ${{ env.download_url }} 下載..."
           curl -L -o "$TEMP_ZIP" "${{ env.download_url }}"
           
-          echo "正在解压文件..."
+          if [ ! -f "$TEMP_ZIP" ]; then
+            echo "::error::下載失敗！"
+            exit 1
+          fi
+
+          echo "正在解压文件並覆蓋舊檔案..."
           unzip -o "$TEMP_ZIP"
           
+          # 清理與更新版本紀錄
           rm "$TEMP_ZIP"
           echo "${{ env.latest_tag }}" > version.txt
+          echo "解壓完成，已更新 version.txt"
 
       # 步骤 3: 提交更改
-      # 使用最新版插件以消除 Node.js 警告
       - name: 提交更新到 GitHub
         if: env.need_update == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 Auto Sync Worker: Update to version ${{ env.latest_tag }}"
+          commit_message: "🔄 Auto Sync: Update BPB Worker to ${{ env.latest_tag }}"
           file_pattern: '_worker.js version.txt'
+          # 選項：如果沒有變動則不報錯
+          skip_dirty_check: false 
