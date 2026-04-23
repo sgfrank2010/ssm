@@ -1,4 +1,4 @@
-name: 同步上游 Worker 代码 (修復版)
+name: 同步上游 Worker 代码 (修正路徑版)
 
 on:
   schedule:
@@ -9,7 +9,6 @@ jobs:
   update:
     runs-on: ubuntu-latest
     env:
-      # 解決 Node 警告
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: write
@@ -18,56 +17,52 @@ jobs:
       - name: Checkout 仓库
         uses: actions/checkout@v4
 
-      - name: 检查版本并获取最新版本
-        id: check_versions
+      - name: 检查版本并下载更新
+        id: process_update
         run: |
-          # 獲取最新 Release 數據
-          RELEASE_DATA=$(curl -s https://github.com)
+          # 1. 獲取最新 Release 資訊
+          API_URL="https://github.com"
+          RELEASE_DATA=$(curl -s $API_URL)
           LATEST_TAG=$(echo "$RELEASE_DATA" | jq -r '.tag_name')
           
-          if [ "$LATEST_TAG" = "null" ] || [ -z "$LATEST_TAG" ]; then
-            echo "::error::找不到 Release 標籤，請檢查上游倉庫狀態。"
+          if [ "$LATEST_TAG" = "null" ]; then
+            echo "::error::無法讀取上游 Release，請確認倉庫地址是否正確。"
             exit 1
           fi
 
-          # 檢查本地版本
+          # 2. 檢查本地版本
           CURRENT_VERSION=$(cat version.txt 2>/dev/null || echo "")
+          echo "最新版本: $LATEST_TAG, 本地版本: $CURRENT_VERSION"
 
           if [ "$CURRENT_VERSION" = "$LATEST_TAG" ]; then
+            echo "版本已是最新，跳過更新。"
             echo "need_update=false" >> $GITHUB_ENV
           else
-            # 動態尋找包含 'worker.zip' 的下載連結，避免硬編碼路徑出錯
-            DL_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | contains("worker.zip")) | .browser_download_url')
+            # 3. 動態尋找 ZIP 附件 (自動適應不同的檔案名稱)
+            DL_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
             
             if [ -z "$DL_URL" ] || [ "$DL_URL" = "null" ]; then
-               echo "::error::在上游 Release 中找不到 worker.zip 文件！"
+               echo "::error::在上游 Release 中找不到任何 ZIP 檔案！"
                exit 1
             fi
 
-            echo "latest_tag=$LATEST_TAG" >> $GITHUB_ENV
-            echo "download_url=$DL_URL" >> $GITHUB_ENV
+            echo "偵測到新版本，準備下載: $DL_URL"
+            
+            # 4. 執行下載與解壓
+            curl -L -f -o update.zip "$DL_URL"
+            unzip -o update.zip
+            
+            # 5. 清理並紀錄版本
+            rm update.zip
+            echo "$LATEST_TAG" > version.txt
             echo "need_update=true" >> $GITHUB_ENV
+            echo "latest_tag=$LATEST_TAG" >> $GITHUB_ENV
           fi
-
-      - name: 下载并解压
-        if: env.need_update == 'true'
-        run: |
-          # 使用 -f 讓 curl 在 404 時報錯，避免 exit code 5
-          echo "正在下載: ${{ env.download_url }}"
-          curl -L -f -o worker_temp.zip "${{ env.download_url }}"
-          
-          if [ $? -ne 0 ]; then
-            echo "::error::下載失敗，請檢查 URL 是否有效。"
-            exit 1
-          fi
-
-          unzip -o worker_temp.zip
-          rm worker_temp.zip
-          echo "${{ env.latest_tag }}" > version.txt
 
       - name: 提交更新到 GitHub
         if: env.need_update == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "🔄 Auto Sync: Update to ${{ env.latest_tag }}"
-          file_pattern: '_worker.js version.txt'
+          # 確保包含解壓後產生的所有新檔案
+          file_pattern: 'version.txt *.js' 
