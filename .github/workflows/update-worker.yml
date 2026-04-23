@@ -1,15 +1,15 @@
-name: 同步上游 Worker 代码 (修正路徑版)
+# 文件位置: .github/workflows/update-worker.yml
+name: 同步上游 Worker 代码 (Zip 解压优化版)
 
 on:
   schedule:
-    - cron: '0 2 * * 1'
-  workflow_dispatch:
+    - cron: '0 2 * * 1' # 每周一 02:00 UTC 运行一次
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     permissions:
       contents: write
 
@@ -17,52 +17,58 @@ jobs:
       - name: Checkout 仓库
         uses: actions/checkout@v4
 
-      - name: 检查版本并下载更新
-        id: process_update
+      # 步骤 1: 获取版本信息并判断是否需要更新
+      - name: 检查版本并获取最新版本
+        id: check_versions
         run: |
-          # 1. 獲取最新 Release 資訊
-          API_URL="https://github.com"
-          RELEASE_DATA=$(curl -s $API_URL)
-          LATEST_TAG=$(echo "$RELEASE_DATA" | jq -r '.tag_name')
+          # 1. 获取最新正式版标签
+          LATEST_TAG=$(curl -s https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases/latest | jq -r '.tag_name')
           
-          if [ "$LATEST_TAG" = "null" ]; then
-            echo "::error::無法讀取上游 Release，請確認倉庫地址是否正確。"
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+            echo "::error::未找到最新正式发布版本，退出。"
             exit 1
           fi
 
-          # 2. 檢查本地版本
-          CURRENT_VERSION=$(cat version.txt 2>/dev/null || echo "")
-          echo "最新版本: $LATEST_TAG, 本地版本: $CURRENT_VERSION"
-
-          if [ "$CURRENT_VERSION" = "$LATEST_TAG" ]; then
-            echo "版本已是最新，跳過更新。"
-            echo "need_update=false" >> $GITHUB_ENV
+          # 2. 获取本地版本
+          if [ -f "version.txt" ]; then
+            CURRENT_VERSION=$(cat version.txt | tr -d '\n' | tr -d '\r')
           else
-            # 3. 動態尋找 ZIP 附件 (自動適應不同的檔案名稱)
-            DL_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
-            
-            if [ -z "$DL_URL" ] || [ "$DL_URL" = "null" ]; then
-               echo "::error::在上游 Release 中找不到任何 ZIP 檔案！"
-               exit 1
-            fi
-
-            echo "偵測到新版本，準備下載: $DL_URL"
-            
-            # 4. 執行下載與解壓
-            curl -L -f -o update.zip "$DL_URL"
-            unzip -o update.zip
-            
-            # 5. 清理並紀錄版本
-            rm update.zip
-            echo "$LATEST_TAG" > version.txt
-            echo "need_update=true" >> $GITHUB_ENV
-            echo "latest_tag=$LATEST_TAG" >> $GITHUB_ENV
+            CURRENT_VERSION=""
           fi
 
+          echo "最新版本: $LATEST_TAG"
+          echo "当前本地版本: ${CURRENT_VERSION:-未找到}"
+
+          # 3. 比较版本，设置环境变量
+          if [ "$CURRENT_VERSION" = "$LATEST_TAG" ]; then
+            echo "No update needed."
+            echo "need_update=false" >> $GITHUB_ENV
+          else
+            echo "Update needed. New tag: $LATEST_TAG"
+            echo "latest_tag=$LATEST_TAG" >> $GITHUB_ENV
+            echo "need_update=true" >> $GITHUB_ENV
+            echo "download_url=https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/download/$LATEST_TAG/worker.zip" >> $GITHUB_ENV
+          fi
+
+      # 步骤 2: 下载并解压 (仅在需要更新时执行)
+      - name: 下载并解压 worker.zip
+        if: env.need_update == 'true'
+        run: |
+          TEMP_ZIP="worker_temp.zip"
+          echo "正在下载文件: ${{ env.download_url }}"
+          curl -L -o "$TEMP_ZIP" "${{ env.download_url }}"
+          
+          echo "正在解压文件..."
+          unzip -o "$TEMP_ZIP"
+          
+          rm "$TEMP_ZIP"
+          echo "${{ env.latest_tag }}" > version.txt
+
+      # 步骤 3: 提交更改
+      # 使用最新版插件以消除 Node.js 警告
       - name: 提交更新到 GitHub
         if: env.need_update == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 Auto Sync: Update to ${{ env.latest_tag }}"
-          # 確保包含解壓後產生的所有新檔案
-          file_pattern: 'version.txt *.js' 
+          commit_message: "🔄 Auto Sync Worker: Update to version ${{ env.latest_tag }}"
+          file_pattern: '_worker.js version.txt'
